@@ -1,168 +1,157 @@
 import os
 import argparse
-import subprocess
-import json
-import time
 from datetime import datetime
+import json
+from run_experiment import run_experiment
+from evaluate_results import load_samples, evaluate_results
 
-def run_experiment(problem_name, spec_path, log_path, num_samples=100, use_api=False, api_model=None):
-    """Run a single LLM-SR experiment using run_experiment.py."""
+def run_experiments(use_api=False, api_model="gpt-3.5-turbo", n_samples_per_problem=25, n_worst=10):
+    """
+    Run LLM-SR experiments on multiple problems and identify the worst-performing samples.
     
-    # Construct command
-    cmd = ["python", "run_experiment.py", 
-           "--problem_name", problem_name,
-           "--spec_path", spec_path,
-           "--log_path", log_path,
-           "--num_samples", str(num_samples)]
+    Args:
+        use_api: Whether to use the OpenAI API
+        api_model: The API model to use if use_api is True
+        n_samples_per_problem: Target number of samples to generate per problem
+        n_worst: Number of worst samples to identify
+    """
+    # Create experiments directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiments_dir = f"./experiments_{timestamp}"
+    os.makedirs(experiments_dir, exist_ok=True)
     
-    if use_api:
-        cmd.append("--use_api")
-        if api_model:
-            cmd.extend(["--api_model", api_model])
+    # Define problems and specifications
+    problems = {
+        "oscillator1": "./specs/specification_oscillator1_numpy.txt",
+        "oscillator2": "./specs/specification_oscillator2_numpy.txt",
+        "bactgrow": "./specs/specification_bactgrow_numpy.txt",
+        "stressstrain": "./specs/specification_stressstrain_numpy.txt"
+    }
     
-    # Execute the command
-    start_time = time.time()
-    print(f"\n{'-'*80}")
-    print(f"Running experiment: {problem_name}")
-    print(f"Specification: {spec_path}")
-    print(f"Log path: {log_path}")
-    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'-'*80}\n")
+    all_samples = []
+    problem_log_dirs = {}
     
-    # Run the process
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    
-    # Stream the output in real-time
-    for line in process.stdout:
-        print(line, end='')
-    
-    # Wait for the process to complete
-    process.wait()
-    
-    # Check for errors
-    if process.returncode != 0:
-        print(f"Error running experiment. Return code: {process.returncode}")
-        for line in process.stderr:
-            print(line, end='')
-        return False
-    
-    elapsed_time = time.time() - start_time
-    print(f"\n{'-'*80}")
-    print(f"Experiment completed in {elapsed_time:.2f} seconds")
-    print(f"Results saved to: {log_path}")
-    print(f"{'-'*80}\n")
-    
-    return True
-
-def evaluate_experiment(experiment_dir):
-    """Evaluate the experiment results using evaluate_results.py."""
-    # Construct command
-    cmd = ["python", "evaluate_results.py", "--experiment_dir", experiment_dir]
-    
-    # Execute the command
-    print(f"\n{'-'*80}")
-    print(f"Evaluating experiment: {experiment_dir}")
-    print(f"{'-'*80}\n")
-    
-    subprocess.run(cmd)
-    
-    print(f"\n{'-'*80}")
-    print(f"Evaluation complete.")
-    print(f"{'-'*80}\n")
-
-def run_all_experiments(experiments, results_dir):
-    """Run all specified experiments."""
-    # Create results directory
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # Create a record of all experiments
-    experiment_log = []
-    
-    # Run each experiment
-    for i, experiment in enumerate(experiments):
-        experiment_name = experiment.get('name', f'experiment_{i+1}')
-        log_path = os.path.join(results_dir, experiment_name)
+    # Run experiments for each problem
+    for problem_name, spec_path in problems.items():
+        log_dir = os.path.join(experiments_dir, problem_name)
+        os.makedirs(log_dir, exist_ok=True)
         
-        # Run the experiment
-        success = run_experiment(
-            problem_name=experiment['problem_name'],
-            spec_path=experiment['spec_path'],
-            log_path=log_path,
-            num_samples=experiment.get('num_samples', 100),
-            use_api=experiment.get('use_api', False),
-            api_model=experiment.get('api_model', None)
-        )
+        print(f"\nRunning experiment for {problem_name} with target {n_samples_per_problem} samples")
         
-        if success:
-            # Evaluate the experiment
-            evaluate_experiment(log_path)
+        try:
+            # Run the experiment
+            run_experiment(
+                problem_name=problem_name,
+                spec_path=spec_path,
+                log_path=log_dir,
+                use_api=use_api,
+                api_model=api_model,
+                max_sample_nums=n_samples_per_problem
+            )
             
-            # Record experiment
-            experiment_log.append({
-                'experiment_name': experiment_name,
-                'status': 'completed',
-                'completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'config': experiment
-            })
-        else:
-            experiment_log.append({
-                'experiment_name': experiment_name,
-                'status': 'failed',
-                'failed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'config': experiment
-            })
+            print(f"Experiment for {problem_name} completed")
+            
+            # Store the log directory
+            problem_log_dirs[problem_name] = log_dir
+            
+            # Load samples from this experiment
+            samples = load_samples(log_dir)
+            for sample in samples:
+                sample['problem_name'] = problem_name
+            
+            all_samples.extend(samples)
+            
+        except Exception as e:
+            print(f"Error running experiment for {problem_name}: {e}")
+    
+    # Process all samples to find the worst ones
+    print(f"\nLoaded {len(all_samples)} total samples from all experiments")
+    
+    # Filter samples with valid scores
+    valid_samples = [s for s in all_samples if s.get('score') is not None]
+    
+    print(f"Found {len(valid_samples)} valid samples with scores")
+    
+    # Sort by score (ascending - lower is worse)
+    valid_samples.sort(key=lambda x: x['score'])
+    
+    # Take the n_worst worst samples
+    worst_samples = valid_samples[:n_worst]
+    
+    # Print the worst samples
+    print(f"\n===== {n_worst} WORST-PERFORMING SAMPLES ACROSS ALL PROBLEMS =====")
+    for i, sample in enumerate(worst_samples):
+        print(f"\nWorst Sample #{i+1}:")
+        print(f"Problem: {sample['problem_name']}")
+        print(f"Log Directory: {sample['log_dir']}")
+        print(f"Filename: {sample['filename']}")
+        print(f"Sample Order: {sample.get('sample_order', 'N/A')}")
+        print(f"Score: {sample['score']}")
+        print("Function:")
+        print("-" * 50)
+        print(sample['function'])
+        print("-" * 50)
+    
+    # Save results to a file
+    results_file = os.path.join(experiments_dir, "worst_samples_overall.json")
+    with open(results_file, 'w') as f:
+        json.dump(worst_samples, f, indent=2)
+    
+    print(f"\nSaved worst samples to {results_file}")
+    
+    # Generate a summary file with information about why these samples performed poorly
+    analysis_file = os.path.join(experiments_dir, "analysis_of_poor_performance.txt")
+    with open(analysis_file, 'w') as f:
+        f.write("ANALYSIS OF POORLY PERFORMING SAMPLES\n")
+        f.write("====================================\n\n")
+        f.write(f"Total samples analyzed: {len(all_samples)}\n")
+        f.write(f"Valid samples with scores: {len(valid_samples)}\n\n")
         
-        # Save experiment log
-        with open(os.path.join(results_dir, 'experiment_log.json'), 'w') as f:
-            json.dump(experiment_log, f, indent=2)
+        f.write("Problem-specific statistics:\n")
+        for problem_name in problems:
+            problem_samples = [s for s in valid_samples if s['problem_name'] == problem_name]
+            if problem_samples:
+                avg_score = sum(s['score'] for s in problem_samples) / len(problem_samples)
+                f.write(f"  {problem_name}: {len(problem_samples)} samples, avg score: {avg_score:.6f}\n")
+        
+        f.write("\nWorst Samples Analysis:\n")
+        for i, sample in enumerate(worst_samples):
+            f.write(f"\n{i+1}. Problem: {sample['problem_name']}, Score: {sample['score']:.6f}\n")
+            f.write(f"   Function: {sample['function'].split('return')[1].strip() if 'return' in sample['function'] else 'Complex function'}\n")
+            
+            # Add potential reasons for poor performance
+            if 'function' in sample:
+                func_text = sample['function'].lower()
+                if '**' in func_text or '^' in func_text:
+                    f.write("   Potential issue: Incorrect power operation syntax\n")
+                if 'nan' in func_text or 'inf' in func_text:
+                    f.write("   Potential issue: Possible numerical instability\n")
+                if 'if ' in func_text or 'else' in func_text:
+                    f.write("   Potential issue: Conditional logic may cause fitting problems\n")
+                if func_text.count('return') > 1:
+                    f.write("   Potential issue: Multiple return statements\n")
+    
+    print(f"Analysis of poor performance saved to {analysis_file}")
+    
+    # Also evaluate each problem individually
+    for problem_name, log_dir in problem_log_dirs.items():
+        print(f"\nEvaluating results for {problem_name}...")
+        evaluate_results(log_dir, n_worst, visualize=True)
+    
+    return worst_samples
 
-def main():
-    parser = argparse.ArgumentParser(description='Run multiple LLM-SR experiments')
-    parser.add_argument('--results_dir', type=str, default='./experiment_results',
-                        help='Directory to save all experiment results')
-    parser.add_argument('--use_api', action='store_true',
-                        help='Use OpenAI API for all experiments')
-    parser.add_argument('--api_model', type=str, default='gpt-3.5-turbo',
-                        help='OpenAI API model to use')
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Run LLM-SR experiments and identify poorly performing samples')
+    parser.add_argument('--use_api', action='store_true', help='Use the OpenAI API')
+    parser.add_argument('--api_model', type=str, default="gpt-3.5-turbo", help='API model to use')
+    parser.add_argument('--n_samples_per_problem', type=int, default=25, help='Target number of samples per problem')
+    parser.add_argument('--n_worst', type=int, default=10, help='Number of worst samples to identify')
     
     args = parser.parse_args()
     
-    # Define experiments
-    experiments = [
-        {
-            'name': 'bactgrow_numpy',
-            'problem_name': 'bactgrow',
-            'spec_path': './specs/specification_bactgrow_numpy.txt',
-            'num_samples': 100,
-            'use_api': args.use_api,
-            'api_model': args.api_model if args.use_api else None
-        },
-        # Add more experiments if needed
-        # {
-        #     'name': 'oscillator1_numpy',
-        #     'problem_name': 'oscillator1',
-        #     'spec_path': './specs/specification_oscillator1_numpy.txt',
-        #     'num_samples': 100,
-        #     'use_api': args.use_api,
-        #     'api_model': args.api_model if args.use_api else None
-        # },
-    ]
-    
-    # Create timestamped results directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_dir = os.path.join(args.results_dir, f'llmsr_{timestamp}')
-    
-    print(f"Running {len(experiments)} experiments")
-    print(f"Results will be saved to: {results_dir}")
-    
-    # Run all experiments
-    run_all_experiments(experiments, results_dir)
-    
-    print(f"\n{'-'*80}")
-    print(f"All experiments completed!")
-    print(f"Results saved to: {results_dir}")
-    print(f"{'-'*80}\n")
-
-
-if __name__ == "__main__":
-    main()
+    run_experiments(
+        use_api=args.use_api,
+        api_model=args.api_model,
+        n_samples_per_problem=args.n_samples_per_problem,
+        n_worst=args.n_worst
+    )
