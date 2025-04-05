@@ -17,21 +17,10 @@ In this paper, we introduce **LLM-SR**, a novel approach for scientific equation
 
 ## Installation
 
-To run the code, create a conda environment and install the dependencies provided in the `requirements.txt` or `environment.yml`:
-
 ```
-conda create -n llmsr python=3.11.7
-conda activate llmsr
 pip install -r requirements.txt
+python setup_experiment.py --install
 ```
-
-or 
-
-```
-conda env create -f environment.yml
-conda activate llmsr
-```
-
 Note: Requires Python ≥ 3.9
 
 
